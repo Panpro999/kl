@@ -702,9 +702,9 @@ void TrackKLT::perform_detection_stereo(const std::vector<cv::Mat> &img0pyr, con
       d_prev_roi.copyTo(d_prev, cv_stream_);
       d_next_roi.copyTo(d_next, cv_stream_);
 
-      // GPU version expects point matrices as Nx1
-      cv::Mat prev_mat((int)pts0_new.size(), 1, CV_32FC2, pts0_new.data());
-      cv::Mat next_mat((int)pts1_new.size(), 1, CV_32FC2, pts1_new.data());
+      // GPU LK requires a 1xN CV_32FC2 matrix
+      cv::Mat prev_mat(1, (int)pts0_new.size(), CV_32FC2, pts0_new.data());
+      cv::Mat next_mat(1, (int)pts1_new.size(), CV_32FC2, pts1_new.data());
       cv::cuda::GpuMat d_prevPts, d_nextPts, d_status, d_err;
       d_prevPts.upload(prev_mat, cv_stream_);
       d_nextPts.upload(next_mat, cv_stream_);
@@ -914,9 +914,9 @@ void TrackKLT::perform_matching(const std::vector<cv::Mat> &img0pyr, const std::
   d_prev_roi.copyTo(d_prev, cv_stream_);
   d_next_roi.copyTo(d_next, cv_stream_);
 
-  // Points must be Nx1 for the GPU LK implementation
-  cv::Mat pts0_mat((int)pts0.size(), 1, CV_32FC2, pts0.data());
-  cv::Mat pts1_mat((int)pts1.size(), 1, CV_32FC2, pts1.data());
+  // GPU LK expects a single row of points
+  cv::Mat pts0_mat(1, (int)pts0.size(), CV_32FC2, pts0.data());
+  cv::Mat pts1_mat(1, (int)pts1.size(), CV_32FC2, pts1.data());
   cv::cuda::GpuMat d_pts0, d_pts1, d_status, d_err;
   d_pts0.upload(pts0_mat, cv_stream_);
   d_pts1.upload(pts1_mat, cv_stream_);
