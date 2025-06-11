@@ -13,7 +13,7 @@ set(CMAKE_CUDA_ARCHITECTURES 75)        # 7.5 Turing, 8.6 Ampere
 # The OpenCV version needs to match the one used by cv_bridge otherwise you will get a segmentation fault!
 find_package(Eigen3 REQUIRED)
 find_package(OpenCV 4.6 REQUIRED
-             COMPONENTS core imgproc cudafeatures2d cudaimgproc)
+             COMPONENTS core imgproc calib3d cudafeatures2d cudaimgproc cudawarping cudaoptflow)
 find_package(Boost REQUIRED COMPONENTS system filesystem thread date_time)
 message(STATUS "OPENCV: " ${OpenCV_VERSION} " | BOOST: " ${Boost_VERSION})
 
