@@ -71,7 +71,6 @@ void TrackKLT::feed_new_camera(const CameraData &message) {
     cv::cuda::GpuMat d_img;
     d_img.upload(img, cv_stream_); // 1. 上传
 
-    const cv::Size win_size(21, 21); // 与 LK 光流一致
     const int pad_x = win_size.width;
     const int pad_y = win_size.height;
 
@@ -694,11 +693,14 @@ void TrackKLT::perform_detection_stereo(const std::vector<cv::Mat> &img0pyr, con
       // NOTE: we have a pretty big window size here since our projection might be bad
       // NOTE: but this might cause failure in cases of repeated textures (eg. checkerboard)
       std::vector<uchar> mask(pts0_new.size(), 0);
-      const int pad_x = 21;
-      const int pad_y = 21;
+      const int pad_x = win_size.width;
+      const int pad_y = win_size.height;
 
-      cv::cuda::GpuMat d_prev = d_img_pyramid_curr_[cam_id_left][0](cv::Rect(pad_x, pad_y, img0pyr.at(0).cols, img0pyr.at(0).rows));
-      cv::cuda::GpuMat d_next = d_img_pyramid_curr_[cam_id_right][0](cv::Rect(pad_x, pad_y, img1pyr.at(0).cols, img1pyr.at(0).rows));
+      cv::cuda::GpuMat d_prev_roi = d_img_pyramid_curr_[cam_id_left][0](cv::Rect(pad_x, pad_y, img0pyr.at(0).cols, img0pyr.at(0).rows));
+      cv::cuda::GpuMat d_next_roi = d_img_pyramid_curr_[cam_id_right][0](cv::Rect(pad_x, pad_y, img1pyr.at(0).cols, img1pyr.at(0).rows));
+      cv::cuda::GpuMat d_prev, d_next;
+      d_prev_roi.copyTo(d_prev, cv_stream_);
+      d_next_roi.copyTo(d_next, cv_stream_);
 
       cv::Mat prev_mat(1, (int)pts0_new.size(), CV_32FC2, pts0_new.data());
       cv::Mat next_mat(1, (int)pts1_new.size(), CV_32FC2, pts1_new.data());
@@ -902,11 +904,14 @@ void TrackKLT::perform_matching(const std::vector<cv::Mat> &img0pyr, const std::
 
   // Now do KLT tracking to get the valid new points (GPU version)
   std::vector<uchar> mask_klt(pts0.size(), 0);
-  const int pad_x = 21;
-  const int pad_y = 21;
+  const int pad_x = win_size.width;
+  const int pad_y = win_size.height;
 
-  cv::cuda::GpuMat d_prev = d_img_pyramid_last_[id0][0](cv::Rect(pad_x, pad_y, img0pyr.at(0).cols, img0pyr.at(0).rows));
-  cv::cuda::GpuMat d_next = d_img_pyramid_curr_[id1][0](cv::Rect(pad_x, pad_y, img1pyr.at(0).cols, img1pyr.at(0).rows));
+  cv::cuda::GpuMat d_prev_roi = d_img_pyramid_last_[id0][0](cv::Rect(pad_x, pad_y, img0pyr.at(0).cols, img0pyr.at(0).rows));
+  cv::cuda::GpuMat d_next_roi = d_img_pyramid_curr_[id1][0](cv::Rect(pad_x, pad_y, img1pyr.at(0).cols, img1pyr.at(0).rows));
+  cv::cuda::GpuMat d_prev, d_next;
+  d_prev_roi.copyTo(d_prev, cv_stream_);
+  d_next_roi.copyTo(d_next, cv_stream_);
 
   cv::Mat pts0_mat(1, (int)pts0.size(), CV_32FC2, pts0.data());
   cv::Mat pts1_mat(1, (int)pts1.size(), CV_32FC2, pts1.data());
