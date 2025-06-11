@@ -702,8 +702,9 @@ void TrackKLT::perform_detection_stereo(const std::vector<cv::Mat> &img0pyr, con
       d_prev_roi.copyTo(d_prev, cv_stream_);
       d_next_roi.copyTo(d_next, cv_stream_);
 
-      cv::Mat prev_mat(1, (int)pts0_new.size(), CV_32FC2, pts0_new.data());
-      cv::Mat next_mat(1, (int)pts1_new.size(), CV_32FC2, pts1_new.data());
+      // GPU version expects point matrices as Nx1
+      cv::Mat prev_mat((int)pts0_new.size(), 1, CV_32FC2, pts0_new.data());
+      cv::Mat next_mat((int)pts1_new.size(), 1, CV_32FC2, pts1_new.data());
       cv::cuda::GpuMat d_prevPts, d_nextPts, d_status, d_err;
       d_prevPts.upload(prev_mat, cv_stream_);
       d_nextPts.upload(next_mat, cv_stream_);
@@ -717,9 +718,9 @@ void TrackKLT::perform_detection_stereo(const std::vector<cv::Mat> &img0pyr, con
       d_nextPts.download(next_out, cv_stream_);
       cv_stream_.waitForCompletion();
 
-      for (int i = 0; i < status_mat.cols; i++) {
-        mask[i] = status_mat.at<uchar>(0, i);
-        pts1_new[i] = next_out.at<cv::Point2f>(0, i);
+      for (int i = 0; i < status_mat.rows; i++) {
+        mask[i] = status_mat.at<uchar>(i, 0);
+        pts1_new[i] = next_out.at<cv::Point2f>(i, 0);
       }
 
       // Loop through and record only ones that are valid
@@ -913,8 +914,9 @@ void TrackKLT::perform_matching(const std::vector<cv::Mat> &img0pyr, const std::
   d_prev_roi.copyTo(d_prev, cv_stream_);
   d_next_roi.copyTo(d_next, cv_stream_);
 
-  cv::Mat pts0_mat(1, (int)pts0.size(), CV_32FC2, pts0.data());
-  cv::Mat pts1_mat(1, (int)pts1.size(), CV_32FC2, pts1.data());
+  // Points must be Nx1 for the GPU LK implementation
+  cv::Mat pts0_mat((int)pts0.size(), 1, CV_32FC2, pts0.data());
+  cv::Mat pts1_mat((int)pts1.size(), 1, CV_32FC2, pts1.data());
   cv::cuda::GpuMat d_pts0, d_pts1, d_status, d_err;
   d_pts0.upload(pts0_mat, cv_stream_);
   d_pts1.upload(pts1_mat, cv_stream_);
@@ -928,9 +930,9 @@ void TrackKLT::perform_matching(const std::vector<cv::Mat> &img0pyr, const std::
   d_pts1.download(pts1_mat_out, cv_stream_);
   cv_stream_.waitForCompletion();
 
-  for (int i = 0; i < status_mat.cols; i++) {
-    mask_klt[i] = status_mat.at<uchar>(0, i);
-    pts1[i] = pts1_mat_out.at<cv::Point2f>(0, i);
+  for (int i = 0; i < status_mat.rows; i++) {
+    mask_klt[i] = status_mat.at<uchar>(i, 0);
+    pts1[i] = pts1_mat_out.at<cv::Point2f>(i, 0);
   }
 
   // Normalize these points, so we can then do ransac
