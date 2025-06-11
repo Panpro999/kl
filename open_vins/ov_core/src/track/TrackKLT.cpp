@@ -67,43 +67,35 @@ void TrackKLT::feed_new_camera(const CameraData &message) {
       img = message.images.at(msg_id);
     }
 
+    // ---------- GPU 构建图像金字塔 ----------
+    cv::cuda::GpuMat d_img;
+    d_img.upload(img, cv_stream_); // 1. 上传
 
-// ---------- GPU 构建图像金字塔 ----------
-cv::cuda::GpuMat d_img;
-d_img.upload(img, cv_stream_);                              // 1. 上传
+    const int pad_x = win_size.width;
+    const int pad_y = win_size.height;
 
-const cv::Size win_size(21, 21);                            // 与 LK 光流一致
-const int pad_x = win_size.width;
-const int pad_y = win_size.height;
+    std::vector<cv::cuda::GpuMat> d_pyr;
+    ov_core::buildPyramidGPU(d_img, d_pyr,
+                             pyr_levels + 1, // levels = N + 1 (含 level-0)
+                             win_size, cv_stream_);
 
-std::vector<cv::cuda::GpuMat> d_pyr;
-ov_core::buildPyramidGPU(d_img, d_pyr,
-                         pyr_levels + 1,    // levels = N + 1 (含 level-0)
-                         win_size,
-                         cv_stream_);
+    d_img_pyramid_curr_[cam_id] = std::move(d_pyr); // 2. 保存 GPU 版
 
-d_img_pyramid_curr_[cam_id] = std::move(d_pyr);             // 2. 保存 GPU 版
+    // ---------- 下载到 CPU，并调整 ROI 偏移 ----------
+    img_pyramid_curr[cam_id].resize(pyr_levels + 1);
 
-// ---------- 下载到 CPU，并调整 ROI 偏移 ----------
-img_pyramid_curr[cam_id].resize(pyr_levels + 1);
+    for (int l = 0; l <= pyr_levels; ++l) {
+      // 下载整幅 padded 图
+      d_img_pyramid_curr_[cam_id][l].download(img_pyramid_curr[cam_id][l], cv_stream_);
 
-for (int l = 0; l <= pyr_levels; ++l)
-{
-    // 下载整幅 padded 图
-    d_img_pyramid_curr_[cam_id][l]
-        .download(img_pyramid_curr[cam_id][l], cv_stream_);
+      // ★★ 关键：收回 ROI，但保留外围内存 ★★
+      img_pyramid_curr[cam_id][l].adjustROI(-pad_y, -pad_y, -pad_x, -pad_x);
+    }
 
-    // ★★ 关键：收回 ROI，但保留外围内存 ★★
-    img_pyramid_curr[cam_id][l]
-        .adjustROI(-pad_y, -pad_y, -pad_x, -pad_x);
-}
+    cv_stream_.waitForCompletion(); // 3. 同步
 
-cv_stream_.waitForCompletion();                             // 3. 同步
-
-// 保存原始灰度图（CPU）
-img_curr[cam_id] = img;
-
-
+    // 保存原始灰度图（CPU）
+    img_curr[cam_id] = img;
   }
 
   // Either call our stereo or monocular version
@@ -147,6 +139,7 @@ void TrackKLT::feed_monocular(const CameraData &message, size_t msg_id) {
     std::lock_guard<std::mutex> lckv(mtx_last_vars);
     img_last[cam_id] = img;
     img_pyramid_last[cam_id] = imgpyr;
+    d_img_pyramid_last_[cam_id] = d_img_pyramid_curr_[cam_id];
     img_mask_last[cam_id] = mask;
     pts_last[cam_id] = good_left;
     ids_last[cam_id] = good_ids_left;
@@ -175,6 +168,7 @@ void TrackKLT::feed_monocular(const CameraData &message, size_t msg_id) {
     std::lock_guard<std::mutex> lckv(mtx_last_vars);
     img_last[cam_id] = img;
     img_pyramid_last[cam_id] = imgpyr;
+    d_img_pyramid_last_[cam_id] = d_img_pyramid_curr_[cam_id];
     img_mask_last[cam_id] = mask;
     pts_last[cam_id].clear();
     ids_last[cam_id].clear();
@@ -214,6 +208,7 @@ void TrackKLT::feed_monocular(const CameraData &message, size_t msg_id) {
     std::lock_guard<std::mutex> lckv(mtx_last_vars);
     img_last[cam_id] = img;
     img_pyramid_last[cam_id] = imgpyr;
+    d_img_pyramid_last_[cam_id] = d_img_pyramid_curr_[cam_id];
     img_mask_last[cam_id] = mask;
     pts_last[cam_id] = good_left;
     ids_last[cam_id] = good_ids_left;
@@ -261,6 +256,8 @@ void TrackKLT::feed_stereo(const CameraData &message, size_t msg_id_left, size_t
     img_last[cam_id_right] = img_right;
     img_pyramid_last[cam_id_left] = imgpyr_left;
     img_pyramid_last[cam_id_right] = imgpyr_right;
+    d_img_pyramid_last_[cam_id_left] = d_img_pyramid_curr_[cam_id_left];
+    d_img_pyramid_last_[cam_id_right] = d_img_pyramid_curr_[cam_id_right];
     img_mask_last[cam_id_left] = mask_left;
     img_mask_last[cam_id_right] = mask_right;
     pts_last[cam_id_left] = good_left;
@@ -695,12 +692,36 @@ void TrackKLT::perform_detection_stereo(const std::vector<cv::Mat> &img0pyr, con
       // Do our KLT tracking from the left to the right frame of reference
       // NOTE: we have a pretty big window size here since our projection might be bad
       // NOTE: but this might cause failure in cases of repeated textures (eg. checkerboard)
-      std::vector<uchar> mask;
-      // perform_matching(img0pyr, img1pyr, kpts0_new, kpts1_new, cam_id_left, cam_id_right, mask);
-      std::vector<float> error;
-      cv::TermCriteria term_crit = cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 30, 0.01);
-      cv::calcOpticalFlowPyrLK(img0pyr, img1pyr, pts0_new, pts1_new, mask, error, win_size, pyr_levels, term_crit,
-                               cv::OPTFLOW_USE_INITIAL_FLOW);
+      std::vector<uchar> mask(pts0_new.size(), 0);
+      const int pad_x = win_size.width;
+      const int pad_y = win_size.height;
+
+      cv::cuda::GpuMat d_prev_roi = d_img_pyramid_curr_[cam_id_left][0](cv::Rect(pad_x, pad_y, img0pyr.at(0).cols, img0pyr.at(0).rows));
+      cv::cuda::GpuMat d_next_roi = d_img_pyramid_curr_[cam_id_right][0](cv::Rect(pad_x, pad_y, img1pyr.at(0).cols, img1pyr.at(0).rows));
+      cv::cuda::GpuMat d_prev, d_next;
+      d_prev_roi.copyTo(d_prev, cv_stream_);
+      d_next_roi.copyTo(d_next, cv_stream_);
+
+      // GPU version expects point matrices as Nx1
+      cv::Mat prev_mat((int)pts0_new.size(), 1, CV_32FC2, pts0_new.data());
+      cv::Mat next_mat((int)pts1_new.size(), 1, CV_32FC2, pts1_new.data());
+      cv::cuda::GpuMat d_prevPts, d_nextPts, d_status, d_err;
+      d_prevPts.upload(prev_mat, cv_stream_);
+      d_nextPts.upload(next_mat, cv_stream_);
+
+      gpu_pyrLK_->calc(d_prev, d_next, d_prevPts, d_nextPts, d_status, d_err, cv_stream_);
+      cv_stream_.waitForCompletion();
+
+      cv::Mat status_mat;
+      d_status.download(status_mat, cv_stream_);
+      cv::Mat next_out;
+      d_nextPts.download(next_out, cv_stream_);
+      cv_stream_.waitForCompletion();
+
+      for (int i = 0; i < status_mat.rows; i++) {
+        mask[i] = status_mat.at<uchar>(i, 0);
+        pts1_new[i] = next_out.at<cv::Point2f>(i, 0);
+      }
 
       // Loop through and record only ones that are valid
       for (size_t i = 0; i < pts0_new.size(); i++) {
@@ -882,11 +903,37 @@ void TrackKLT::perform_matching(const std::vector<cv::Mat> &img0pyr, const std::
     return;
   }
 
-  // Now do KLT tracking to get the valid new points
-  std::vector<uchar> mask_klt;
-  std::vector<float> error;
-  cv::TermCriteria term_crit = cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 30, 0.01);
-  cv::calcOpticalFlowPyrLK(img0pyr, img1pyr, pts0, pts1, mask_klt, error, win_size, pyr_levels, term_crit, cv::OPTFLOW_USE_INITIAL_FLOW);
+  // Now do KLT tracking to get the valid new points (GPU version)
+  std::vector<uchar> mask_klt(pts0.size(), 0);
+  const int pad_x = win_size.width;
+  const int pad_y = win_size.height;
+
+  cv::cuda::GpuMat d_prev_roi = d_img_pyramid_last_[id0][0](cv::Rect(pad_x, pad_y, img0pyr.at(0).cols, img0pyr.at(0).rows));
+  cv::cuda::GpuMat d_next_roi = d_img_pyramid_curr_[id1][0](cv::Rect(pad_x, pad_y, img1pyr.at(0).cols, img1pyr.at(0).rows));
+  cv::cuda::GpuMat d_prev, d_next;
+  d_prev_roi.copyTo(d_prev, cv_stream_);
+  d_next_roi.copyTo(d_next, cv_stream_);
+
+  // Points must be Nx1 for the GPU LK implementation
+  cv::Mat pts0_mat((int)pts0.size(), 1, CV_32FC2, pts0.data());
+  cv::Mat pts1_mat((int)pts1.size(), 1, CV_32FC2, pts1.data());
+  cv::cuda::GpuMat d_pts0, d_pts1, d_status, d_err;
+  d_pts0.upload(pts0_mat, cv_stream_);
+  d_pts1.upload(pts1_mat, cv_stream_);
+
+  gpu_pyrLK_->calc(d_prev, d_next, d_pts0, d_pts1, d_status, d_err, cv_stream_);
+  cv_stream_.waitForCompletion();
+
+  cv::Mat status_mat;
+  d_status.download(status_mat, cv_stream_);
+  cv::Mat pts1_mat_out;
+  d_pts1.download(pts1_mat_out, cv_stream_);
+  cv_stream_.waitForCompletion();
+
+  for (int i = 0; i < status_mat.rows; i++) {
+    mask_klt[i] = status_mat.at<uchar>(i, 0);
+    pts1[i] = pts1_mat_out.at<cv::Point2f>(i, 0);
+  }
 
   // Normalize these points, so we can then do ransac
   // We don't want to do ransac on distorted image uvs since the mapping is nonlinear
